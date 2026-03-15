@@ -97,7 +97,9 @@ function stitch_playlists() {
     echo "#EXT-X-KEY:METHOD=AES-128,URI=\"video.key\"" >> "$FINAL_FILE"
 
     for p in ${RES}_*.m3u8; do
-        grep -v "^#" "$p" >> "$FINAL_FILE"
+        # Keep everything from the first #EXTINF until the end of the segments
+        # Remove #EXT-X-ENDLIST as we will add it once at the end
+        sed -n '/#EXTINF/,$p' "$p" | grep -v "#EXT-X-ENDLIST" >> "$FINAL_FILE"
     done
     echo "#EXT-X-ENDLIST" >> "$FINAL_FILE"
 }
