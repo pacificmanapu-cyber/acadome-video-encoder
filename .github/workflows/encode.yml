@@ -51,7 +51,7 @@ jobs:
         run: |
           # Sync output to user-specific HLS path
           echo "Syncing encoded files to R2 path: users/$USER_ID/videos/$FILE_NAME/hls/"
-          aws s3 sync output/ s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/hls/ --endpoint-url $R2_ENDPOINT
+          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/hls/ --endpoint-url $R2_ENDPOINT
 
       - name: Notify Callback
         run: |
