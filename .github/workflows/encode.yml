@@ -1,0 +1,54 @@
+name: AcaDome Video Encoder
+
+on:
+  repository_dispatch:
+    types: [encode_video]
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'URL of the source video'
+        required: true
+      file_name:
+        description: 'Output file name (identifier)'
+        required: true
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg openssl
+
+      - name: Download Source Video
+        run: |
+          wget -O input_video.mp4 "${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
+
+      - name: Process Video
+        run: |
+          chmod +x scripts/process.sh
+          ./scripts/process.sh input_video.mp4 "${{ github.event.client_payload.file_name || github.event.inputs.file_name }}"
+
+      - name: Upload to R2 (Inbox-ready)
+        # This step would typically use an S3-compatible CLI to sync to R2
+        # Example using rclone or aws-cli (requires secrets)
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          # Placeholder for R2 sync logic
+          # aws s3 sync output/ s3://$R2_BUCKET/encoded/ --endpoint-url $R2_ENDPOINT
+          echo "Syncing encoded files to R2..."
+
+      - name: Notify Callback
+        run: |
+          CALLBACK_URL="${{ github.event.client_payload.callback_url || 'https://acadome.dev/api/webhooks/video' }}"
+          curl -X POST $CALLBACK_URL \
+            -H "Content-Type: application/json" \
+            -d '{"status": "completed", "file_name": "${{ github.event.client_payload.file_name || github.event.inputs.file_name }}"}'
