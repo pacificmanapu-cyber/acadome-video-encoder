@@ -52,6 +52,12 @@ jobs:
           # Sync output to user-specific HLS path
           echo "Syncing encoded files to R2 path: users/$USER_ID/videos/$FILE_NAME/hls/"
           aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/hls/ --endpoint-url $R2_ENDPOINT
+          
+          # Delete the original mp4 source file to prevent egress leaks
+          echo "Deleting the raw original file from R2..."
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT || true
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mov --endpoint-url $R2_ENDPOINT || true
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.webm --endpoint-url $R2_ENDPOINT || true
 
       - name: Notify Callback
         run: |
