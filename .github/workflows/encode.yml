@@ -25,7 +25,7 @@ jobs:
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg openssl
+          sudo apt-get install -y ffmpeg openssl bc
 
       - name: Download Source Video
         run: |
@@ -36,36 +36,111 @@ jobs:
           chmod +x scripts/process.sh
           ./scripts/process.sh input_video.mp4 "${{ github.event.client_payload.file_name || github.event.inputs.file_name }}"
 
-      - name: Setup AWS CLI for R2
+      - name: Setup AWS CLI
         run: |
-          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws configure set default.region auto
+          # We configure multiple profiles for R2, B2, and E2
+          # R2 (for deleting original)
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }} --profile r2
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }} --profile r2
+          aws configure set default.region auto --profile r2
 
-      - name: Upload to R2 (Inbox-ready)
+          # B2 (for HLS upload)
+          aws configure set aws_access_key_id ${{ secrets.B2_ACCESS_KEY_ID }} --profile b2
+          aws configure set aws_secret_access_key ${{ secrets.B2_SECRET_ACCESS_KEY }} --profile b2
+          aws configure set default.region us-west-004 --profile b2
+
+          # E2 (for archive upload)
+          aws configure set aws_access_key_id ${{ secrets.E2_ACCESS_KEY_ID }} --profile e2
+          aws configure set aws_secret_access_key ${{ secrets.E2_SECRET_ACCESS_KEY }} --profile e2
+          aws configure set default.region ap-southeast-1 --profile e2
+
+      - name: Upload HLS to B2
+        env:
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+        run: |
+          HLS_PATH="users/$USER_ID/videos/$FILE_NAME/hls"
+          echo "Uploading HLS segments to B2: $HLS_PATH"
+          
+          # Sync only HLS files (.ts, .m3u8, .key) to B2 — NOT the archive folder
+          aws s3 sync output/$FILE_NAME/ s3://$B2_BUCKET/$HLS_PATH/ \
+            --endpoint-url $B2_ENDPOINT \
+            --profile b2 \
+            --exclude "archive/*" \
+            --exclude "segment_keys.txt" \
+            --exclude "part_*"
+          
+          echo "HLS upload to B2 complete."
+
+      - name: Upload Compressed Archive to E2
+        env:
+          E2_ENDPOINT: ${{ secrets.E2_ENDPOINT }}
+          E2_BUCKET: ${{ secrets.E2_BUCKET_NAME }}
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+        run: |
+          ARCHIVE_KEY="users/$USER_ID/videos/$FILE_NAME/compressed.mp4"
+          echo "Uploading compressed archive to E2: $ARCHIVE_KEY"
+          
+          aws s3 cp output/$FILE_NAME/archive/compressed.mp4 \
+            s3://$E2_BUCKET/$ARCHIVE_KEY \
+            --endpoint-url $E2_ENDPOINT \
+            --profile e2
+          
+          echo "Archive upload to E2 complete."
+
+      - name: Delete Original from R2
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
-          # Sync output to user-specific HLS path
-          echo "Syncing encoded files to R2 path: users/$USER_ID/videos/$FILE_NAME/hls/"
-          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/hls/ --endpoint-url $R2_ENDPOINT
-          
-          # Delete the original mp4 source file to prevent egress leaks
-          echo "Deleting the raw original file from R2..."
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mov --endpoint-url $R2_ENDPOINT || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.webm --endpoint-url $R2_ENDPOINT || true
+          echo "Deleting raw original file from R2..."
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mov --endpoint-url $R2_ENDPOINT --profile r2 || true
+          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.webm --endpoint-url $R2_ENDPOINT --profile r2 || true
+          echo "R2 cleanup complete."
 
-      - name: Notify Callback
+      - name: Calculate Sizes and Prepare Payload
+        id: sizes
+        env:
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+        run: |
+          HLS_SIZE=$(find output/$FILE_NAME -maxdepth 1 \( -name "*.ts" -o -name "*.m3u8" -o -name "*.key" \) -exec stat -c%s {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          ARCHIVE_SIZE=$(stat -c%s output/$FILE_NAME/archive/compressed.mp4 2>/dev/null || echo "0")
+          
+          # Collect segment keys for CDN warming
+          SEGMENT_KEYS=$(cd output/$FILE_NAME && ls -1 *.ts 2>/dev/null | head -20 | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          
+          echo "hls_size=$HLS_SIZE" >> $GITHUB_OUTPUT
+          echo "archive_size=$ARCHIVE_SIZE" >> $GITHUB_OUTPUT
+          echo "segment_keys=$SEGMENT_KEYS" >> $GITHUB_OUTPUT
+          
+          echo "HLS Size: $HLS_SIZE bytes"
+          echo "Archive Size: $ARCHIVE_SIZE bytes"
+
+      - name: Notify Callback (Enriched Payload)
+        env:
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
           CALLBACK_URL="${{ github.event.client_payload.callback_url || 'https://acadome.dev/api/webhooks/video' }}"
+          
           curl -X POST $CALLBACK_URL \
             -H "Content-Type: application/json" \
             -d '{
               "status": "completed",
-              "file_name": "${{ github.event.client_payload.file_name || github.event.inputs.file_name }}",
-              "user_id": "${{ github.event.client_payload.user_id || github.event.inputs.user_id }}"
+              "file_name": "'"$FILE_NAME"'",
+              "user_id": "'"$USER_ID"'",
+              "hls_provider": "b2",
+              "hls_base_path": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/hls",
+              "archive_provider": "e2",
+              "archive_key": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/compressed.mp4",
+              "hls_size_bytes": ${{ steps.sizes.outputs.hls_size }},
+              "archive_size_bytes": ${{ steps.sizes.outputs.archive_size }},
+              "segment_keys": ${{ steps.sizes.outputs.segment_keys }}
             }'

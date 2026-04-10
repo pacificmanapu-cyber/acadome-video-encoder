@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # AcaDome Video Processor
-# Handles duration checking, splitting, multi-bitrate HLS encoding, and AES-128 encryption.
+# Handles duration checking, splitting, multi-bitrate HLS encoding, AES-128 encryption,
+# and creates a compressed archive copy for long-term storage.
 
 INPUT_VIDEO=$1
 OUTPUT_NAME=$2
@@ -19,9 +20,11 @@ cd output/"$OUTPUT_NAME"
 DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "../../$INPUT_VIDEO")
 WIDTH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of default=noprint_wrappers=1:nokey=1 "../../$INPUT_VIDEO")
 HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=noprint_wrappers=1:nokey=1 "../../$INPUT_VIDEO")
+ORIGINAL_SIZE=$(stat -c%s "../../$INPUT_VIDEO" 2>/dev/null || stat -f%z "../../$INPUT_VIDEO" 2>/dev/null)
 
 echo "Video Duration: $DURATION seconds"
 echo "Video Resolution: ${WIDTH}x${HEIGHT}"
+echo "Original Size: $ORIGINAL_SIZE bytes"
 
 # 2. Generate Encryption Key
 openssl rand 16 > video.key
@@ -121,4 +124,33 @@ if [ "$HAS_480P" = true ]; then
     echo "480p.m3u8" >> master.m3u8
 fi
 
+# 7. Create compressed archive copy for E2 long-term storage
+echo "Creating compressed archive copy for E2..."
+mkdir -p archive
+ffmpeg -i "../../$INPUT_VIDEO" \
+    -c:v libx264 -crf 28 -maxrate 1.5M -bufsize 3M \
+    -preset medium -filter:v "scale=-2:'min(720,ih)'" \
+    -c:a aac -b:a 128k -ac 2 \
+    -movflags +faststart \
+    archive/compressed.mp4
+
+ARCHIVE_SIZE=$(stat -c%s archive/compressed.mp4 2>/dev/null || stat -f%z archive/compressed.mp4 2>/dev/null)
+echo "Archive Size: $ARCHIVE_SIZE bytes (Original: $ORIGINAL_SIZE bytes)"
+
+# 8. Clean up intermediate part files (DO NOT keep them in output)
+echo "Cleaning up intermediate part files..."
+rm -f part_*.mp4
+rm -f *_*.m3u8  # Remove per-part playlists (we stitched them)
+rm -f key_info
+
+# 9. Calculate HLS total size
+HLS_SIZE=$(find . -maxdepth 1 \( -name "*.ts" -o -name "*.m3u8" -o -name "*.key" \) -exec stat -c%s {} + 2>/dev/null | awk '{s+=$1} END {print s}' || echo "0")
+echo "HLS Total Size: $HLS_SIZE bytes"
+
+# 10. Generate segment keys list for CDN warming
+echo "Generating segment keys list..."
+ls -1 *.ts 2>/dev/null > segment_keys.txt || true
+
 echo "Optimized Encoding Complete. Storage usage minimized."
+echo "ARCHIVE_SIZE=$ARCHIVE_SIZE"
+echo "HLS_SIZE=$HLS_SIZE"
