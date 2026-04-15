@@ -19,6 +19,9 @@ if [ -z "$INPUT_VIDEO" ] || [ -z "$OUTPUT_NAME" ]; then
     exit 1
 fi
 
+MODE=${MODE:-hls} # Default to hls mode
+echo "  Mode:       $MODE"
+
 mkdir -p output/"$OUTPUT_NAME"
 cd output/"$OUTPUT_NAME"
 
@@ -77,44 +80,46 @@ if [ "$HEIGHT" -ge 480 ]; then HAS_480P=true; fi
 if [ "$HAS_480P" = false ] && [ "$HAS_720P" = false ]; then HAS_480P=true; fi
 
 # ───────────────────────────────────────────────
-# 5. Encoding Loop (Quality-focused CRF values)
+# 5. Encoding Loop
 # ───────────────────────────────────────────────
-echo "Starting Multi-Bitrate HLS Encoding (AES-128)..."
+if [ "$MODE" = "compress" ]; then
+    echo "Skipping HLS encoding (Compress mode active)."
+else
+    echo "Starting Multi-Bitrate HLS Encoding (AES-128)..."
 
-for part in part_*.mp4; do
-    PART_NUM=${part#part_}
-    PART_NUM=${PART_NUM%.mp4}
+    for part in part_*.mp4; do
+        PART_NUM=${part#part_}
+        PART_NUM=${PART_NUM%.mp4}
 
-    # 720p — CRF 23 (visually lossless), maxrate 2M for smooth streaming
-    if [ "$HAS_720P" = true ]; then
-        echo "Encoding Part $PART_NUM (720p, CRF 23)..."
-        ffmpeg -i "$part" \
-            -c:v libx264 -crf 23 -maxrate 2M -bufsize 4M \
-            -preset slow -tune film -profile:v high -level 4.1 \
-            -filter:v "scale=-2:720,format=yuv420p" \
-            -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
-            -c:a aac -b:a 128k -ac 2 -ar 44100 \
-            -movflags +faststart \
-            -hls_time 6 -hls_playlist_type vod \
-            -hls_key_info_file key_info \
-            -hls_segment_filename "720p_${PART_NUM}_%03d.ts" "720p_${PART_NUM}.m3u8"
-    fi
+        if [ "$HAS_720P" = true ]; then
+            echo "Encoding Part $PART_NUM (720p, CRF 23)..."
+            ffmpeg -i "$part" \
+                -c:v libx264 -crf 23 -maxrate 2M -bufsize 4M \
+                -preset slow -tune film -profile:v high -level 4.1 \
+                -filter:v "scale=-2:720,format=yuv420p" \
+                -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
+                -c:a aac -b:a 128k -ac 2 -ar 44100 \
+                -movflags +faststart \
+                -hls_time 6 -hls_playlist_type vod \
+                -hls_key_info_file key_info \
+                -hls_segment_filename "720p_${PART_NUM}_%03d.ts" "720p_${PART_NUM}.m3u8"
+        fi
 
-    # 480p — CRF 25 (great for mobile), maxrate 1M
-    if [ "$HAS_480P" = true ]; then
-        echo "Encoding Part $PART_NUM (480p, CRF 25)..."
-        ffmpeg -i "$part" \
-            -c:v libx264 -crf 25 -maxrate 1M -bufsize 2M \
-            -preset slow -tune film -profile:v main -level 3.1 \
-            -filter:v "scale=-2:480,format=yuv420p" \
-            -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
-            -c:a aac -b:a 96k -ac 2 -ar 44100 \
-            -movflags +faststart \
-            -hls_time 6 -hls_playlist_type vod \
-            -hls_key_info_file key_info \
-            -hls_segment_filename "480p_${PART_NUM}_%03d.ts" "480p_${PART_NUM}.m3u8"
-    fi
-done
+        if [ "$HAS_480P" = true ]; then
+            echo "Encoding Part $PART_NUM (480p, CRF 25)..."
+            ffmpeg -i "$part" \
+                -c:v libx264 -crf 25 -maxrate 1M -bufsize 2M \
+                -preset slow -tune film -profile:v main -level 3.1 \
+                -filter:v "scale=-2:480,format=yuv420p" \
+                -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
+                -c:a aac -b:a 96k -ac 2 -ar 44100 \
+                -movflags +faststart \
+                -hls_time 6 -hls_playlist_type vod \
+                -hls_key_info_file key_info \
+                -hls_segment_filename "480p_${PART_NUM}_%03d.ts" "480p_${PART_NUM}.m3u8"
+        fi
+    done
+fi
 
 # ───────────────────────────────────────────────
 # 6. Stitch Playlists (merge split parts)
@@ -137,23 +142,27 @@ function stitch_playlists() {
     echo "#EXT-X-ENDLIST" >> "$FINAL_FILE"
 }
 
-if [ "$HAS_720P" = true ]; then stitch_playlists "720p"; fi
-if [ "$HAS_480P" = true ]; then stitch_playlists "480p"; fi
+if [ "$MODE" != "compress" ]; then
+    if [ "$HAS_720P" = true ]; then stitch_playlists "720p"; fi
+    if [ "$HAS_480P" = true ]; then stitch_playlists "480p"; fi
+fi
 
 # ───────────────────────────────────────────────
 # 7. Master Playlist
 # ───────────────────────────────────────────────
-echo "#EXTM3U" > master.m3u8
-echo "#EXT-X-VERSION:3" >> master.m3u8
+if [ "$MODE" != "compress" ]; then
+    echo "#EXTM3U" > master.m3u8
+    echo "#EXT-X-VERSION:3" >> master.m3u8
 
-if [ "$HAS_720P" = true ]; then
-    echo "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,NAME=\"720p\"" >> master.m3u8
-    echo "720p.m3u8" >> master.m3u8
-fi
+    if [ "$HAS_720P" = true ]; then
+        echo "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,NAME=\"720p\"" >> master.m3u8
+        echo "720p.m3u8" >> master.m3u8
+    fi
 
-if [ "$HAS_480P" = true ]; then
-    echo "#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=842x480,NAME=\"480p\"" >> master.m3u8
-    echo "480p.m3u8" >> master.m3u8
+    if [ "$HAS_480P" = true ]; then
+        echo "#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=842x480,NAME=\"480p\"" >> master.m3u8
+        echo "480p.m3u8" >> master.m3u8
+    fi
 fi
 
 # ───────────────────────────────────────────────

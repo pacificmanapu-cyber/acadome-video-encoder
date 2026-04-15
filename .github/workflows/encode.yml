@@ -14,6 +14,10 @@ on:
       user_id:
         description: 'User ID for storage organization'
         required: true
+      context:
+        description: 'Context of the video (post or chat)'
+        required: false
+        default: 'post'
 
 jobs:
   encode:
@@ -32,6 +36,8 @@ jobs:
           wget -O input_video.mp4 "${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
 
       - name: Process Video
+        env:
+          MODE: ${{ (github.event.client_payload.context == 'chat') && 'compress' || 'hls' }}
         run: |
           chmod +x scripts/process.sh
           ./scripts/process.sh input_video.mp4 "${{ github.event.client_payload.file_name || github.event.inputs.file_name }}"
@@ -53,61 +59,60 @@ jobs:
           aws configure set aws_secret_access_key ${{ secrets.E2_SECRET_ACCESS_KEY }} --profile e2
           aws configure set default.region ap-southeast-1 --profile e2
 
-      - name: Upload HLS to B2 (with Cache Headers)
+      - name: Upload HLS to R2 (Initial Hot Storage)
+        if: github.event.client_payload.context != 'chat'
         env:
-          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
-          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
           HLS_PATH="users/$USER_ID/videos/$FILE_NAME/hls"
-          echo "Uploading HLS segments to B2: $HLS_PATH"
+          echo "Uploading HLS segments to R2: $HLS_PATH"
           
-          # Upload .ts segments with immutable cache
-          aws s3 sync output/$FILE_NAME/ s3://$B2_BUCKET/$HLS_PATH/ \
-            --endpoint-url $B2_ENDPOINT \
-            --profile b2 \
+          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/$HLS_PATH/ \
+            --endpoint-url $R2_ENDPOINT \
+            --profile r2 \
             --exclude "*" \
             --include "*.ts" \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "video/MP2T"
 
-          # Upload .m3u8 playlists with short cache (for live-like updates)
-          aws s3 sync output/$FILE_NAME/ s3://$B2_BUCKET/$HLS_PATH/ \
-            --endpoint-url $B2_ENDPOINT \
-            --profile b2 \
+          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/$HLS_PATH/ \
+            --endpoint-url $R2_ENDPOINT \
+            --profile r2 \
             --exclude "*" \
             --include "*.m3u8" \
             --cache-control "public, max-age=3600, s-maxage=86400" \
             --content-type "application/vnd.apple.mpegurl"
 
-          # Upload encryption key
-          aws s3 cp output/$FILE_NAME/video.key s3://$B2_BUCKET/$HLS_PATH/video.key \
-            --endpoint-url $B2_ENDPOINT \
-            --profile b2 \
+          aws s3 cp output/$FILE_NAME/video.key s3://$R2_BUCKET/$HLS_PATH/video.key \
+            --endpoint-url $R2_ENDPOINT \
+            --profile r2 \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "application/octet-stream"
 
-          echo "HLS upload to B2 complete."
-
-      - name: Upload Compressed Archive to E2
+      - name: Upload Compressed Archive to R2
         env:
-          E2_ENDPOINT: ${{ secrets.E2_ENDPOINT }}
-          E2_BUCKET: ${{ secrets.E2_BUCKET_NAME }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+          CONTEXT: ${{ github.event.client_payload.context || 'post' }}
         run: |
-          ARCHIVE_KEY="users/$USER_ID/videos/$FILE_NAME/compressed.mp4"
-          echo "Uploading compressed archive to E2: $ARCHIVE_KEY"
+          if [ "$CONTEXT" == "chat" ]; then
+            ARCHIVE_KEY="users/$USER_ID/chat/videos/$FILE_NAME/compressed.mp4"
+          else
+            ARCHIVE_KEY="users/$USER_ID/videos/$FILE_NAME/compressed.mp4"
+          fi
           
+          echo "Uploading compressed archive to R2: $ARCHIVE_KEY"
           aws s3 cp output/$FILE_NAME/archive/compressed.mp4 \
-            s3://$E2_BUCKET/$ARCHIVE_KEY \
-            --endpoint-url $E2_ENDPOINT \
-            --profile e2 \
+            s3://$R2_BUCKET/$ARCHIVE_KEY \
+            --endpoint-url $R2_ENDPOINT \
+            --profile r2 \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "video/mp4"
-          
-          echo "Archive upload to E2 complete."
 
       - name: Upload Thumbnail & Metadata to R2 (Hot Files)
         env:
@@ -116,9 +121,13 @@ jobs:
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
-          BASE_PATH="users/$USER_ID/videos/$FILE_NAME"
+          CONTEXT=${{ github.event.client_payload.context || 'post' }}
+          if [ "$CONTEXT" == "chat" ]; then
+            BASE_PATH="users/$USER_ID/chat/videos/$FILE_NAME"
+          else
+            BASE_PATH="users/$USER_ID/videos/$FILE_NAME"
+          fi
           
-          # Thumbnail stays in R2 (hot file, zero egress)
           if [ -f output/$FILE_NAME/thumbnail.jpg ]; then
             aws s3 cp output/$FILE_NAME/thumbnail.jpg \
               s3://$R2_BUCKET/$BASE_PATH/thumbnail.jpg \
@@ -126,7 +135,6 @@ jobs:
               --profile r2 \
               --cache-control "public, max-age=31536000, immutable" \
               --content-type "image/jpeg"
-            echo "Thumbnail uploaded to R2."
           fi
 
           # Metadata stays in R2 (hot file)
@@ -147,12 +155,11 @@ jobs:
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
+          CONTEXT=${{ github.event.client_payload.context || 'post' }}
           echo "Deleting raw original file from R2..."
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mov --endpoint-url $R2_ENDPOINT --profile r2 || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.webm --endpoint-url $R2_ENDPOINT --profile r2 || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.avi --endpoint-url $R2_ENDPOINT --profile r2 || true
-          aws s3 rm s3://$R2_BUCKET/users/$USER_ID/videos/$FILE_NAME/original.mkv --endpoint-url $R2_ENDPOINT --profile r2 || true
+          if [ "$CONTEXT" == "chat" ]; then
+            aws s3 rm s3://$R2_BUCKET/users/$USER_ID/chat/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
+          fi
           echo "R2 cleanup complete."
 
       - name: Calculate Sizes and Prepare Payload
@@ -182,19 +189,30 @@ jobs:
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
           CALLBACK_URL="${{ github.event.client_payload.callback_url || 'https://acadome.dev/api/webhooks/video' }}"
+          CONTEXT="${{ github.event.client_payload.context || 'post' }}"
           
+          if [ "$CONTEXT" == "chat" ]; then
+            H_PATH="users/$USER_ID/chat/videos/$FILE_NAME/hls"
+            A_KEY="users/$USER_ID/chat/videos/$FILE_NAME/compressed.mp4"
+            T_KEY="users/$USER_ID/chat/videos/$FILE_NAME/thumbnail.jpg"
+          else
+            H_PATH="users/$USER_ID/videos/$FILE_NAME/hls"
+            A_KEY="users/$USER_ID/videos/$FILE_NAME/compressed.mp4"
+            T_KEY="users/$USER_ID/videos/$FILE_NAME/thumbnail.jpg"
+          fi
+
           curl -X POST $CALLBACK_URL \
             -H "Content-Type: application/json" \
             -d '{
               "status": "completed",
               "file_name": "'"$FILE_NAME"'",
               "user_id": "'"$USER_ID"'",
-              "hls_provider": "b2",
-              "hls_base_path": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/hls",
-              "archive_provider": "e2",
-              "archive_key": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/compressed.mp4",
-              "thumbnail_key": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/thumbnail.jpg",
-              "metadata_key": "users/'"$USER_ID"'/videos/'"$FILE_NAME"'/metadata.json",
+              "context": "'"$CONTEXT"'",
+              "hls_provider": "r2",
+              "hls_base_path": "'"$H_PATH"'",
+              "archive_provider": "r2",
+              "archive_key": "'"$A_KEY"'",
+              "thumbnail_key": "'"$T_KEY"'",
               "hls_size_bytes": ${{ steps.sizes.outputs.hls_size }},
               "archive_size_bytes": ${{ steps.sizes.outputs.archive_size }},
               "thumbnail_size_bytes": ${{ steps.sizes.outputs.thumb_size }},
