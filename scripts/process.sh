@@ -176,14 +176,17 @@ ffmpeg -i "../../$INPUT_VIDEO" -ss 2 -vframes 1 \
 THUMB_SIZE=$(stat -c%s thumbnail.jpg 2>/dev/null || echo "0")
 
 # ───────────────────────────────────────────────
-# 9. Compressed Archive (High Quality CRF 22)
+# 9. Compressed Archive (High Quality CRF 22/25)
 # ───────────────────────────────────────────────
-echo "Creating compressed archive (CRF 22, high quality)..."
+ARCHIVE_HEIGHT=720
+if [ "$MODE" = "compress" ]; then ARCHIVE_HEIGHT=480; fi
+
+echo "Creating compressed archive (Max ${ARCHIVE_HEIGHT}p)..."
 mkdir -p archive
 ffmpeg -i "../../$INPUT_VIDEO" \
     -c:v libx264 -crf 22 -maxrate 2.5M -bufsize 5M \
     -preset slow -tune film -profile:v high -level 4.1 \
-    -filter:v "scale=-2:'min(720,ih)',format=yuv420p" \
+    -filter:v "scale=-2:'min($ARCHIVE_HEIGHT,ih)',format=yuv420p" \
     -c:a aac -b:a 128k -ac 2 -ar 44100 \
     -movflags +faststart \
     archive/compressed.mp4
@@ -210,7 +213,7 @@ cat > metadata.json <<EOF
     "archive_size": $ARCHIVE_SIZE,
     "thumbnail_size": $THUMB_SIZE,
     "segment_count": $SEGMENT_COUNT,
-    "variants": [$([ "$HAS_720P" = true ] && echo '"720p"')$([ "$HAS_720P" = true ] && [ "$HAS_480P" = true ] && echo ', ')$([ "$HAS_480P" = true ] && echo '"480p"')],
+    "variants": [$([ "$MODE" != "compress" ] && [ "$HAS_720P" = true ] && echo '"720p"')$([ "$MODE" != "compress" ] && [ "$HAS_720P" = true ] && [ "$HAS_480P" = true ] && echo ', ')$([ "$MODE" != "compress" ] && [ "$HAS_480P" = true ] && echo '"480p"')],
     "encoded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
