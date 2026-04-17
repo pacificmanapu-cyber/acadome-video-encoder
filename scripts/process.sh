@@ -100,7 +100,7 @@ else
                 -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
                 -c:a aac -b:a 128k -ac 2 -ar 44100 \
                 -movflags +faststart \
-                -hls_time 6 -hls_playlist_type vod \
+                -hls_time 8 -hls_playlist_type vod \
                 -hls_key_info_file key_info \
                 -hls_segment_filename "720p_${PART_NUM}_%03d.ts" "720p_${PART_NUM}.m3u8"
         fi
@@ -114,7 +114,7 @@ else
                 -g "$GOP" -keyint_min "$GOP" -sc_threshold 0 \
                 -c:a aac -b:a 96k -ac 2 -ar 44100 \
                 -movflags +faststart \
-                -hls_time 6 -hls_playlist_type vod \
+                -hls_time 8 -hls_playlist_type vod \
                 -hls_key_info_file key_info \
                 -hls_segment_filename "480p_${PART_NUM}_%03d.ts" "480p_${PART_NUM}.m3u8"
         fi

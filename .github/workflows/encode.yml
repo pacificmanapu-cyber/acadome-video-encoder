@@ -59,43 +59,43 @@ jobs:
           aws configure set aws_secret_access_key ${{ secrets.E2_SECRET_ACCESS_KEY }} --profile e2
           aws configure set default.region ap-southeast-1 --profile e2
 
-      - name: Upload HLS to R2 (Initial Hot Storage)
+      - name: Upload HLS to B2 (Streaming Storage)
         if: github.event.client_payload.context != 'chat'
         env:
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
           HLS_PATH="users/$USER_ID/videos/$FILE_NAME/hls"
-          echo "Uploading HLS segments to R2: $HLS_PATH"
+          echo "Uploading HLS segments to B2: $HLS_PATH"
           
-          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/$HLS_PATH/ \
-            --endpoint-url $R2_ENDPOINT \
-            --profile r2 \
+          aws s3 sync output/$FILE_NAME/ s3://$B2_BUCKET/$HLS_PATH/ \
+            --endpoint-url $B2_ENDPOINT \
+            --profile b2 \
             --exclude "*" \
             --include "*.ts" \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "video/MP2T"
 
-          aws s3 sync output/$FILE_NAME/ s3://$R2_BUCKET/$HLS_PATH/ \
-            --endpoint-url $R2_ENDPOINT \
-            --profile r2 \
+          aws s3 sync output/$FILE_NAME/ s3://$B2_BUCKET/$HLS_PATH/ \
+            --endpoint-url $B2_ENDPOINT \
+            --profile b2 \
             --exclude "*" \
             --include "*.m3u8" \
             --cache-control "public, max-age=3600, s-maxage=86400" \
             --content-type "application/vnd.apple.mpegurl"
 
-          aws s3 cp output/$FILE_NAME/video.key s3://$R2_BUCKET/$HLS_PATH/video.key \
-            --endpoint-url $R2_ENDPOINT \
-            --profile r2 \
+          aws s3 cp output/$FILE_NAME/video.key s3://$B2_BUCKET/$HLS_PATH/video.key \
+            --endpoint-url $B2_ENDPOINT \
+            --profile b2 \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "application/octet-stream"
 
-      - name: Upload Compressed Archive to R2
+      - name: Upload Compressed Archive to E2 (Original Store)
         env:
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          E2_ENDPOINT: ${{ secrets.E2_ENDPOINT }}
+          E2_BUCKET: ${{ secrets.E2_BUCKET_NAME }}
           USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
           CONTEXT: ${{ github.event.client_payload.context || 'post' }}
@@ -106,11 +106,11 @@ jobs:
             ARCHIVE_KEY="users/$USER_ID/videos/$FILE_NAME/compressed.mp4"
           fi
           
-          echo "Uploading compressed archive to R2: $ARCHIVE_KEY"
+          echo "Uploading compressed archive to E2: $ARCHIVE_KEY"
           aws s3 cp output/$FILE_NAME/archive/compressed.mp4 \
-            s3://$R2_BUCKET/$ARCHIVE_KEY \
-            --endpoint-url $R2_ENDPOINT \
-            --profile r2 \
+            s3://$E2_BUCKET/$ARCHIVE_KEY \
+            --endpoint-url $E2_ENDPOINT \
+            --profile e2 \
             --cache-control "public, max-age=31536000, immutable" \
             --content-type "video/mp4"
 
@@ -148,7 +148,7 @@ jobs:
             echo "Metadata uploaded to R2."
           fi
 
-      - name: Delete Original from R2
+      - name: Purge Cache and Cleanup Raw R2 Files
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
@@ -156,11 +156,19 @@ jobs:
           FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
         run: |
           CONTEXT=${{ github.event.client_payload.context || 'post' }}
-          echo "Deleting raw original file from R2..."
+          echo "Deleting raw original file and intermediate part files from R2..."
           if [ "$CONTEXT" == "chat" ]; then
-            aws s3 rm s3://$R2_BUCKET/users/$USER_ID/chat/videos/$FILE_NAME/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
+            BASE="users/$USER_ID/chat/videos/$FILE_NAME"
+          else
+            BASE="users/$USER_ID/videos/$FILE_NAME"
           fi
+
+          # Delete the original raw upload
+          aws s3 rm s3://$R2_BUCKET/$BASE/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
+          
+          # Delete intermediate work folder (if any accidentally uploaded)
           echo "R2 cleanup complete."
+
 
       - name: Calculate Sizes and Prepare Payload
         id: sizes
@@ -182,6 +190,26 @@ jobs:
           echo "thumb_size=$THUMB_SIZE" >> $GITHUB_OUTPUT
           echo "segment_keys=$SEGMENT_KEYS" >> $GITHUB_OUTPUT
           echo "metadata=$METADATA" >> $GITHUB_OUTPUT
+
+      - name: Strategic CDN Warming
+        if: github.event.client_payload.context != 'chat'
+        env:
+          B2_CDN: https://media-b2.acadome.dev
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+        run: |
+          H_PATH="users/$USER_ID/videos/$FILE_NAME/hls"
+          echo "Warming high-priority playlists..."
+          curl -I -s "$B2_CDN/$H_PATH/master.m3u8" || true
+          curl -I -s "$B2_CDN/$H_PATH/720p.m3u8" || true
+          curl -I -s "$B2_CDN/$H_PATH/480p.m3u8" || true
+          
+          echo "Warming first 10 segments for each variant..."
+          for i in {0..9}; do
+            SEG=$(printf "%03d" $i)
+            curl -I -s "$B2_CDN/$H_PATH/720p_000_$SEG.ts" || true
+            curl -I -s "$B2_CDN/$H_PATH/480p_000_$SEG.ts" || true
+          done
 
       - name: Notify Callback (Enriched Payload)
         env:
@@ -208,9 +236,9 @@ jobs:
               "file_name": "'"$FILE_NAME"'",
               "user_id": "'"$USER_ID"'",
               "context": "'"$CONTEXT"'",
-              "hls_provider": "r2",
+              "hls_provider": "b2",
               "hls_base_path": "'"$H_PATH"'",
-              "archive_provider": "r2",
+              "archive_provider": "e2",
               "archive_key": "'"$A_KEY"'",
               "thumbnail_key": "'"$T_KEY"'",
               "hls_size_bytes": ${{ steps.sizes.outputs.hls_size }},
