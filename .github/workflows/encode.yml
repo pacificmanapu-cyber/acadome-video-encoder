@@ -195,7 +195,12 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           
           echo "metadata<<EOF" >> $GITHUB_OUTPUT
-          echo "$METADATA" >> $GITHUB_OUTPUT
+          if [ -f output/$FILE_NAME/metadata.json ]; then
+            cat output/$FILE_NAME/metadata.json >> $GITHUB_OUTPUT
+          else
+            echo "{}" >> $GITHUB_OUTPUT
+          fi
+          echo "" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Strategic CDN Warming
