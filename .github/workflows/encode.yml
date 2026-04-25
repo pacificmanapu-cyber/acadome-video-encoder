@@ -36,6 +36,7 @@ jobs:
           wget -O input_video.mp4 "${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
 
       - name: Process Video
+        id: process_video
         env:
           MODE: ${{ (github.event.client_payload.context == 'chat') && 'compress' || 'hls' }}
         run: |
@@ -93,6 +94,7 @@ jobs:
             --content-type "application/octet-stream"
 
       - name: Upload Compressed Archive to E2 (Original Store)
+        id: upload_compressed
         env:
           E2_ENDPOINT: ${{ secrets.E2_ENDPOINT }}
           E2_BUCKET: ${{ secrets.E2_BUCKET_NAME }}
@@ -240,7 +242,7 @@ jobs:
             }'
 
       - name: Purge Cache and Cleanup Raw R2 Files
-        if: always()
+        if: always() && steps.process_video.outcome == 'success' && steps.upload_compressed.outcome == 'success'
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
