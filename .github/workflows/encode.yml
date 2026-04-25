@@ -148,27 +148,6 @@ jobs:
             echo "Metadata uploaded to R2."
           fi
 
-      - name: Purge Cache and Cleanup Raw R2 Files
-        env:
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
-          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
-          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
-        run: |
-          CONTEXT=${{ github.event.client_payload.context || 'post' }}
-          echo "Deleting raw original file and intermediate part files from R2..."
-          if [ "$CONTEXT" == "chat" ]; then
-            BASE="users/$USER_ID/chat/videos/$FILE_NAME"
-          else
-            BASE="users/$USER_ID/videos/$FILE_NAME"
-          fi
-
-          # Delete the original raw upload
-          aws s3 rm s3://$R2_BUCKET/$BASE/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
-          
-          # Delete intermediate work folder (if any accidentally uploaded)
-          echo "R2 cleanup complete."
-
 
       - name: Calculate Sizes and Prepare Payload
         id: sizes
@@ -259,3 +238,25 @@ jobs:
               "segment_keys": ${{ steps.sizes.outputs.segment_keys }},
               "video_metadata": ${{ steps.sizes.outputs.metadata }}
             }'
+
+      - name: Purge Cache and Cleanup Raw R2 Files
+        if: success()
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          USER_ID: ${{ github.event.client_payload.user_id || github.event.inputs.user_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name || github.event.inputs.file_name }}
+        run: |
+          CONTEXT=${{ github.event.client_payload.context || 'post' }}
+          echo "Deleting raw original file and intermediate part files from R2..."
+          if [ "$CONTEXT" == "chat" ]; then
+            BASE="users/$USER_ID/chat/videos/$FILE_NAME"
+          else
+            BASE="users/$USER_ID/videos/$FILE_NAME"
+          fi
+
+          # Delete the original raw upload
+          aws s3 rm s3://$R2_BUCKET/$BASE/original.mp4 --endpoint-url $R2_ENDPOINT --profile r2 || true
+          
+          # Delete intermediate work folder (if any accidentally uploaded)
+          echo "R2 cleanup complete."
