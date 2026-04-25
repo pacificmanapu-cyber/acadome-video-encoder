@@ -188,8 +188,15 @@ jobs:
           echo "hls_size=$HLS_SIZE" >> $GITHUB_OUTPUT
           echo "archive_size=$ARCHIVE_SIZE" >> $GITHUB_OUTPUT
           echo "thumb_size=$THUMB_SIZE" >> $GITHUB_OUTPUT
-          echo "segment_keys=$SEGMENT_KEYS" >> $GITHUB_OUTPUT
-          echo "metadata=$METADATA" >> $GITHUB_OUTPUT
+          
+          # Use Heredoc for multi-line JSON
+          echo "segment_keys<<EOF" >> $GITHUB_OUTPUT
+          echo "$SEGMENT_KEYS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "metadata<<EOF" >> $GITHUB_OUTPUT
+          echo "$METADATA" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Strategic CDN Warming
         if: github.event.client_payload.context != 'chat'
