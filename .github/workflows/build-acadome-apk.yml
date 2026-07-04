@@ -130,13 +130,14 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
-
+          REACT_NATIVE_NODE_MODULES_DIR: ${{ github.workspace }}/node_modules
       - name: Build Debug APK
         if: ${{ github.event.inputs.build_type == 'debug' }}
         working-directory: apps/user-native/android
         run: ./gradlew assembleDebug --no-daemon
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          REACT_NATIVE_NODE_MODULES_DIR: ${{ github.workspace }}/node_modules
 
       # ── 13. Find & Rename APK ────────────────────────────
       - name: Locate and Rename APK
