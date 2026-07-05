@@ -23,6 +23,8 @@ jobs:
     name: 🔨 Build AcaDome APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
       # ── 1. Checkout Private AcaDome Repo ───────────────
